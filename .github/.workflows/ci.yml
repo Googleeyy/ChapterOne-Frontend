@@ -1,0 +1,46 @@
+name: CI/CD Pipeline
+
+# =============================================================================
+# TRIGGER CONDITIONS
+# =============================================================================
+on:
+  # Automated triggers for dev and production branches
+  push:
+    branches: [dev, production]
+  pull_request:
+    branches: [dev, production]
+  
+  # Manual trigger for production releases with version input
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semantic version for production release (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+# =============================================================================
+# CALL REUSABLE WORKFLOW
+# =============================================================================
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable-ci.yml
+    with:
+      working_directory: '.'
+      image_name: ${{ github.event.repository.name }}
+      service_name: ${{ github.event.repository.name }}
+      docker_context: '.'
+      dockerfile_path: 'Dockerfile'
+      # Pass manual version if workflow_dispatch triggered
+      manual_version: ${{ github.event.inputs.version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
