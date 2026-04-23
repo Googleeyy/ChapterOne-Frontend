@@ -24,7 +24,7 @@ on:
 # =============================================================================
 jobs:
   ci:
-    uses: ./.github/workflows/reusable-ci.yml
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/reusable-ci.yml@main
     with:
       working_directory: '.'
       image_name: ${{ github.event.repository.name }}
