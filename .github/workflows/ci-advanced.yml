@@ -1,4 +1,10 @@
-name: Advanced CI Pipeline
+name: Advanced CI Pipeline (Node.js Caller)
+
+permissions:
+  contents: write
+  actions: read
+  checks: read
+  security-events: write
 
 permissions:
   contents: write  # Required to push tags
@@ -12,24 +18,34 @@ on:
     branches: [dev, production]
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Semantic version for production release (e.g., v1.0.0)'
-        required: true
-        default: 'v1.0.0'
+      image_name:
+        description: 'Docker Hub image name'
+        required: false
         type: string
+      node_version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: '20'
+      working_directory:
+        description: 'Working directory'
+        required: false
+        type: string
+        default: '.'
 
 env:
-  DOCKER_REGISTRY: docker.io
-  NODE_VERSION: '20'
+  IMAGE_NAME: ${{ github.event.inputs.image_name || vars.IMAGE_NAME || github.event.repository.name }}
+  NODE_VERSION: ${{ github.event.inputs.node_version || vars.NODE_VERSION || '20' }}
+  WORKING_DIRECTORY: ${{ github.event.inputs.working_directory || vars.WORKING_DIRECTORY || '.' }}
 
 jobs:
 
-# ─────────────────────────────────────────────
-# PREPARE
-# ─────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  # PREPARE — Resolve Docker image tag based on branch + commit
+  # ─────────────────────────────────────────────
   prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       push: ${{ steps.tag.outputs.push }}
@@ -38,301 +54,182 @@ jobs:
       image_name: ${{ steps.vars.outputs.image_name_lowercase }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set Image Name Lowercase
         id: vars
         run: |
-          REPO_NAME="${{ github.event.repository.name }}"
+          REPO_NAME="${{ env.IMAGE_NAME }}"
           echo "image_name_lowercase=${REPO_NAME,,}" >> $GITHUB_OUTPUT
 
       - name: Resolve Tag
         id: tag
         run: |
           if [[ "${{ github.ref_name }}" == "production" ]]; then
-            # Get latest tag or start from v0.0.0
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            echo "Latest tag: $LATEST_TAG"
-            
+            # Get latest semver tag or start from v0.0.0
+            latest_tag=$(git tag -l 'v*.*.*' | sort -V | tail -n 1)
+            if [[ -z "$latest_tag" ]]; then
+              latest_tag="v0.0.0"
+            fi
+            echo "Latest tag: $latest_tag"
+
             # Parse version components
-            VERSION=${LATEST_TAG#v}
-            MAJOR=$(echo $VERSION | cut -d. -f1)
-            MINOR=$(echo $VERSION | cut -d. -f2)
-            PATCH=$(echo $VERSION | cut -d. -f3)
-            
-            # Analyze commits since last tag for Conventional Commits
-            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s" 2>/dev/null || echo "")
-            
-            # Check for breaking changes
-            if echo "$COMMITS" | grep -qE "^[a-z]+(\(.+\))?!:|BREAKING CHANGE:"; then
-              MAJOR=$((MAJOR + 1))
-              MINOR=0
-              PATCH=0
+            version=${latest_tag#v}
+            major=$(echo "$version" | cut -d. -f1)
+            minor=$(echo "$version" | cut -d. -f2)
+            patch=$(echo "$version" | cut -d. -f3)
+
+            # Read commit message for Conventional Commits
+            commit_msg=$(git log -1 --pretty=%B)
+            echo "Commit message: $commit_msg"
+
+            if [[ "$commit_msg" == BREAKING\ CHANGE:* || "$commit_msg" == *"!:"* ]]; then
+              major=$((major + 1))
+              minor=0
+              patch=0
               echo "Detected BREAKING CHANGE - Major version bump"
-            # Check for new features
-            elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
-              MINOR=$((MINOR + 1))
-              PATCH=0
+            elif [[ "$commit_msg" == feat:* ]]; then
+              minor=$((minor + 1))
+              patch=0
               echo "Detected feat - Minor version bump"
-            # Check for fixes
-            elif echo "$COMMITS" | grep -qE "^fix(\(.+\))?:"; then
-              PATCH=$((PATCH + 1))
+            elif [[ "$commit_msg" == fix:* ]]; then
+              patch=$((patch + 1))
               echo "Detected fix - Patch version bump"
             else
-              PATCH=$((PATCH + 1))
+              patch=$((patch + 1))
               echo "No conventional commits found - Patch version bump"
             fi
-            
-            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
-            echo "New version: $NEW_TAG"
-            
-            # Create and push tag
-            git config user.name "GitHub Actions"
-            git config user.email "actions@github.com"
-            git tag $NEW_TAG
-            git push origin $NEW_TAG
-            
-            echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
-            echo "source=auto_semver" >> $GITHUB_OUTPUT
+
+            new_tag="v${major}.${minor}.${patch}"
+            echo "tag=$new_tag" >> $GITHUB_OUTPUT
             echo "push=true" >> $GITHUB_OUTPUT
             echo "is_production=true" >> $GITHUB_OUTPUT
             echo "is_dev=false" >> $GITHUB_OUTPUT
+            echo "New production tag: $new_tag"
           else
-            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            short_sha="${GITHUB_SHA::7}"
+            echo "tag=dev-${short_sha}" >> $GITHUB_OUTPUT
             echo "push=true" >> $GITHUB_OUTPUT
             echo "is_production=false" >> $GITHUB_OUTPUT
             echo "is_dev=true" >> $GITHUB_OUTPUT
+            echo "New dev tag: dev-${short_sha}"
           fi
 
-# ─────────────────────────────────────────────
-# TEST
-# ─────────────────────────────────────────────
+      - name: Generate Job Summary
+        if: always()
+        run: |
+          echo "## 📋 Prepare Job Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tag** | ${{ steps.tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Push** | ${{ steps.tag.outputs.push }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Is Production** | ${{ steps.tag.outputs.is_production }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────
+  # TEST — Run unit tests inline
+  # ─────────────────────────────────────────────
   test:
+    name: Test
     runs-on: ubuntu-latest
     needs: prepare
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
 
       - name: Run tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}
         run: npm test
 
-# ─────────────────────────────────────────────
-# SONAR
-# ─────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  # SONAR — Reusable SonarQube scan
+  # ─────────────────────────────────────────────
   sonar:
-    runs-on: ubuntu-latest
-    needs: prepare
+    name: SonarQube Scan
+    needs: test
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_sonar.yml@main
+    with:
+      runtime: node
+      working_directory: ${{ env.WORKING_DIRECTORY }}
+      sonar_project_key: ${{ vars.SONAR_PROJECT_KEY || '' }}
+      node_version: ${{ env.NODE_VERSION }}
+    secrets: inherit
 
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: SonarSource/sonarqube-scan-action@v6
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: SonarQube Quality Gate Check
-        uses: sonarsource/sonarqube-quality-gate-action@master
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-# ─────────────────────────────────────────────
-# SNYK
-# ─────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  # SNYK — Reusable Snyk vulnerability scan
+  # ─────────────────────────────────────────────
   snyk:
-    runs-on: ubuntu-latest
-    needs: prepare
+    name: Snyk Security Scan
+    needs: test
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_snyk.yml@main
+    with:
+      runtime: node
+      working_directory: ${{ env.WORKING_DIRECTORY }}
+      node_version: ${{ env.NODE_VERSION }}
+      severity_threshold: ${{ vars.SNYK_SEVERITY || 'high' }}
+    secrets: inherit
 
-    steps:
-      - uses: actions/checkout@v4
+  # ─────────────────────────────────────────────
+  # BUILD + TRIVY — Build Docker image and scan
+  # ─────────────────────────────────────────────
+  build_trivy:
+    name: Build & Trivy Scan
+    needs: [prepare, sonar, snyk]
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_build_trivy.yml@main
+    with:
+      runtime: node
+      image_name: ${{ needs.prepare.outputs.image_name }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      is_production: ${{ needs.prepare.outputs.is_production }}
+      working_directory: ${{ env.WORKING_DIRECTORY }}
+      docker_context: '.'
+      dockerfile_path: 'Dockerfile'
+      node_version: ${{ env.NODE_VERSION }}
+      trivy_severity: ${{ vars.TRIVY_SEVERITY || 'CRITICAL,HIGH' }}
+      trivy_ignore_unfixed: ${{ vars.TRIVY_IGNORE_UNFIXED || 'false' }}
+    secrets: inherit
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+  # ─────────────────────────────────────────────
+  # PUSH — Push image to Docker Hub
+  # ─────────────────────────────────────────────
+  push:
+    name: Push to Registry
+    needs: [prepare, build_trivy]
+    if: needs.prepare.outputs.push == 'true'
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_push.yml@main
+    with:
+      image_name: ${{ needs.prepare.outputs.image_name }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      is_production: ${{ needs.prepare.outputs.is_production }}
+      push_dev_images: ${{ vars.PUSH_DEV_IMAGES || 'true' }}
+    secrets: inherit
 
-      - name: Install dependencies
-        run: npm install
-
-      - uses: snyk/actions/node@master
-        with:
-          command: test
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
-# ─────────────────────────────────────────────
-# BUILD (Dev only - builds and creates artifact)
-# ─────────────────────────────────────────────
-  build:
-    runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk]
-    if: needs.prepare.outputs.is_dev == 'true'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build Application
-        run: npm run build
-
-      - name: Docker Build
-        run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }} .
-
-      - name: Save Image
-        run: docker save -o image.tar ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: image
-          path: image.tar
-
-# ─────────────────────────────────────────────
-# TRIVY (Scans the built image on dev, skipped on production)
-# ─────────────────────────────────────────────
-  trivy:
-    runs-on: ubuntu-latest
-    needs: [prepare, build]
-
-    steps:
-      - name: Skip on production
-        if: needs.prepare.outputs.is_production == 'true'
-        run: echo "Skipping Trivy scan on production - image was already scanned during dev build"
-
-      - uses: actions/download-artifact@v4
-        if: needs.prepare.outputs.is_dev == 'true'
-        with:
-          name: image
-
-      - name: Load image
-        if: needs.prepare.outputs.is_dev == 'true'
-        run: docker load -i image.tar
-
-      - uses: aquasecurity/trivy-action@master
-        if: needs.prepare.outputs.is_dev == 'true'
-        with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
-          exit-code: 1
-          severity: CRITICAL,HIGH
-
-# ─────────────────────────────────────────────
-# PUSH DEV (Builds and pushes from dev branch)
-# ─────────────────────────────────────────────
-  push-dev:
-    runs-on: ubuntu-latest
-    needs: [prepare, snyk, build, trivy]
-    if: needs.prepare.outputs.push == 'true' && needs.prepare.outputs.is_dev == 'true'
-
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: image
-
-      - name: Load image
-        run: docker load -i image.tar
-
-      - name: Tag and push dev image
-        run: |
-          docker tag ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }} ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
-          docker push ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest
-
-# ─────────────────────────────────────────────
-# PUSH PROD (Promotes latest image to semver on production)
-# ─────────────────────────────────────────────
-  push-prod:
-    runs-on: ubuntu-latest
-    needs: [prepare, snyk]
-    if: needs.prepare.outputs.push == 'true' && needs.prepare.outputs.is_production == 'true'
-
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Pull latest, retag with semantic version, and push
-        run: |
-          docker pull ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest
-          docker tag ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
-          docker push ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
-          echo "Pushed production image: ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}"
-
-# ─────────────────────────────────────────────
-# NOTIFY
-# ─────────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  # NOTIFY — Send email notification
+  # ─────────────────────────────────────────────
   notify:
-    runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk, push-dev, push-prod]
-
-    steps:
-      - name: Check Email Enabled
-        id: email
-        run: |
-          if [ -n "${{ secrets.SMTP_HOST }}" ]; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "enabled=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Send Success Mail
-        if: steps.email.outputs.enabled == 'true' && success()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "CI Success - ${{ github.event.repository.name }} (${{ needs.prepare.outputs.tag }})"
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions
-          body: |
-            Build succeeded for ${{ github.event.repository.name }}
-            Tag: ${{ needs.prepare.outputs.tag }}
-            Commit: ${{ github.sha }}
-            Branch: ${{ github.ref_name }}
-
-      - name: Send Failure Mail
-        if: steps.email.outputs.enabled == 'true' && failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "CI Failed - ${{ github.event.repository.name }} (${{ needs.prepare.outputs.tag }})"
-          to: ${{ secrets.EMAIL_TO }}
-          from: GitHub Actions
-          body: |
-            Build failed for ${{ github.event.repository.name }}
-            Tag: ${{ needs.prepare.outputs.tag }}
-            Commit: ${{ github.sha }}
-            Branch: ${{ github.ref_name }}
-            Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} 
+    name: Email Notification
+    needs: [prepare, sonar, snyk, build_trivy, push]
+    if: always()
+    uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_notify.yml@main
+    with:
+      service_name: ${{ needs.prepare.outputs.image_name }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      pipeline_status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+    secrets: inherit
