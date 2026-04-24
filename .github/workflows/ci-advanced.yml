@@ -29,12 +29,18 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       push: ${{ steps.tag.outputs.push }}
       is_production: ${{ steps.tag.outputs.is_production }}
-      image_name: ${{ github.event.repository.name }}
+      image_name: ${{ steps.vars.outputs.image_name_lowercase }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set Image Name Lowercase
+        id: vars
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          echo "image_name_lowercase=${REPO_NAME,,}" >> $GITHUB_OUTPUT
 
       - name: Resolve Tag
         id: tag
