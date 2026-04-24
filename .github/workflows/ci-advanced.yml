@@ -1,0 +1,265 @@
+name: Advanced CI Pipeline
+
+on:
+  push:
+    branches: [dev, production]
+  pull_request:
+    branches: [dev, production]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semantic version for production release (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+env:
+  DOCKER_REGISTRY: docker.io
+  NODE_VERSION: '20'
+
+jobs:
+
+# ─────────────────────────────────────────────
+# PREPARE
+# ─────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      push: ${{ steps.tag.outputs.push }}
+      is_production: ${{ steps.tag.outputs.is_production }}
+      image_name: ${{ steps.vars.outputs.image_name_lowercase }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Image Name Lowercase
+        id: vars
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          echo "image_name_lowercase=${REPO_NAME,,}" >> $GITHUB_OUTPUT
+
+      - name: Resolve Tag
+        id: tag
+        run: |
+          if [[ "${{ github.ref_name }}" == "production" ]]; then
+            # Try to get version from Git tag (e.g., v1.0.0)
+            GIT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+            
+            if [ -n "$GIT_TAG" ]; then
+              echo "tag=$GIT_TAG" >> $GITHUB_OUTPUT
+              echo "source=git_tag" >> $GITHUB_OUTPUT
+            elif [ -n "${{ github.event.inputs.version }}" ]; then
+              echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+              echo "source=manual" >> $GITHUB_OUTPUT
+            else
+              echo "Error: Production release requires a Git tag (e.g., v1.0.0) or manual version input"
+              exit 1
+            fi
+            echo "push=true" >> $GITHUB_OUTPUT
+            echo "is_production=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
+            echo "is_production=false" >> $GITHUB_OUTPUT
+          fi
+
+# ─────────────────────────────────────────────
+# TEST
+# ─────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+# ─────────────────────────────────────────────
+# SONAR
+# ─────────────────────────────────────────────
+  sonar:
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+# ─────────────────────────────────────────────
+# SNYK
+# ─────────────────────────────────────────────
+  snyk:
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - uses: snyk/actions/node@master
+        with:
+          command: test
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+# ─────────────────────────────────────────────
+# BUILD
+# ─────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    needs: [prepare, test, sonar, snyk]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Application
+        run: npm run build
+
+      - name: Docker Build
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }} .
+
+      - name: Save Image
+        run: docker save -o image.tar ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar
+
+# ─────────────────────────────────────────────
+# TRIVY
+# ─────────────────────────────────────────────
+  trivy:
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - run: docker load -i image.tar
+
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
+          exit-code: 1
+          severity: CRITICAL,HIGH
+
+# ─────────────────────────────────────────────
+# PUSH
+# ─────────────────────────────────────────────
+  push:
+    runs-on: ubuntu-latest
+    needs: [prepare, trivy]
+    if: needs.prepare.outputs.push == 'true'
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - run: docker load -i image.tar
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push version tag
+        run: docker push ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }}
+
+      - name: Push latest tag (production only)
+        if: needs.prepare.outputs.is_production == 'true'
+        run: |
+          docker tag ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.tag }} ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ needs.prepare.outputs.image_name }}:latest
+
+# ─────────────────────────────────────────────
+# NOTIFY
+# ─────────────────────────────────────────────
+  notify:
+    runs-on: ubuntu-latest
+    needs: [prepare, test, sonar, snyk, build, trivy, push]
+    if: always()
+
+    steps:
+      - name: Check Email Enabled
+        id: email
+        run: |
+          if [ -n "${{ secrets.SMTP_HOST }}" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Success Mail
+        if: steps.email.outputs.enabled == 'true' && success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Success - ${{ github.event.repository.name }} (${{ needs.prepare.outputs.tag }})"
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Build succeeded for ${{ github.event.repository.name }}
+            Tag: ${{ needs.prepare.outputs.tag }}
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+
+      - name: Send Failure Mail
+        if: steps.email.outputs.enabled == 'true' && failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Failed - ${{ github.event.repository.name }} (${{ needs.prepare.outputs.tag }})"
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Build failed for ${{ github.event.repository.name }}
+            Tag: ${{ needs.prepare.outputs.tag }}
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
