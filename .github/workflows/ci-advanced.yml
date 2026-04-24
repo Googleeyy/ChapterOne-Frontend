@@ -161,9 +161,9 @@ jobs:
     uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_sonar.yml@main
     with:
       runtime: node
-      working_directory: ${{ env.WORKING_DIRECTORY }}
+      working_directory: ${{ vars.WORKING_DIRECTORY || '.' }}
       sonar_project_key: ${{ vars.SONAR_PROJECT_KEY || '' }}
-      node_version: ${{ env.NODE_VERSION }}
+      node_version: ${{ vars.NODE_VERSION || '20' }}
     secrets: inherit
 
   # ─────────────────────────────────────────────
@@ -175,8 +175,8 @@ jobs:
     uses: Googleeyy/ChapterOne-Reusable-Templates/.github/workflows/_snyk.yml@main
     with:
       runtime: node
-      working_directory: ${{ env.WORKING_DIRECTORY }}
-      node_version: ${{ env.NODE_VERSION }}
+      working_directory: ${{ vars.WORKING_DIRECTORY || '.' }}
+      node_version: ${{ vars.NODE_VERSION || '20' }}
       severity_threshold: ${{ vars.SNYK_SEVERITY || 'high' }}
     secrets: inherit
 
@@ -192,10 +192,10 @@ jobs:
       image_name: ${{ needs.prepare.outputs.image_name }}
       tag: ${{ needs.prepare.outputs.tag }}
       is_production: ${{ needs.prepare.outputs.is_production }}
-      working_directory: ${{ env.WORKING_DIRECTORY }}
+      working_directory: ${{ vars.WORKING_DIRECTORY || '.' }}
       docker_context: '.'
       dockerfile_path: 'Dockerfile'
-      node_version: ${{ env.NODE_VERSION }}
+      node_version: ${{ vars.NODE_VERSION || '20' }}
       trivy_severity: ${{ vars.TRIVY_SEVERITY || 'CRITICAL,HIGH' }}
       trivy_ignore_unfixed: ${{ vars.TRIVY_IGNORE_UNFIXED || 'false' }}
     secrets: inherit
