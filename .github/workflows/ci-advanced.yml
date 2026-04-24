@@ -63,7 +63,7 @@ jobs:
             echo "is_production=true" >> $GITHUB_OUTPUT
           else
             echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-            echo "push=false" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
             echo "is_production=false" >> $GITHUB_OUTPUT
           fi
 
