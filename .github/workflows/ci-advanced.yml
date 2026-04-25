@@ -6,10 +6,6 @@ permissions:
   checks: read
   security-events: write
 
-permissions:
-  contents: write  # Required to push tags
-  actions: read
-  checks: read
 
 on:
   push:
