@@ -9,10 +9,10 @@ permissions:
 on:
   push:
     branches: [dev, production]
-
+   
   pull_request:
     branches: [dev, production]
-
+ 
   workflow_dispatch:
     inputs:
       image_name:
@@ -227,6 +227,8 @@ jobs:
       service-name: frontend
       image-tag: ${{ needs.prepare.outputs.tag }}
       environment: ${{ needs.prepare.outputs.is_production == 'true' && 'production' || 'dev' }}
+      require-approval: ${{ needs.prepare.outputs.is_production == 'true' && true || false }}  
+   
     secrets:
       HELM_REPO_PAT: ${{ secrets.HELM_REPO_PAT }}
 
